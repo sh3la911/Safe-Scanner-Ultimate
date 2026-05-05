@@ -4,8 +4,11 @@ import ctypes
 import platform
 import subprocess
 import hashlib
+import time
+import math
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 import socket
 
 try:
@@ -13,7 +16,6 @@ try:
 except ImportError:
     psutil = None
 
-# استيراد محرك القواعد الجديد
 from rulescanner import scan_with_rules, RULES
 
 # ---------- مساعد ----------
@@ -48,7 +50,7 @@ def suspicious_name_score(name):
 def in_user_dirs(p):
     return any(d in p.lower() for d in ["downloads", "temp", "appdata", "desktop"])
 
-# ---------- فحص التوقيع الرقمي (Windows only) ----------
+# ---------- فحص التوقيع الرقمي ----------
 def check_digital_signature(file_path):
     if not is_windows() or not file_path.lower().endswith(('.exe', '.dll', '.sys')):
         return None, None
@@ -94,7 +96,7 @@ def check_digital_signature(file_path):
     except Exception:
         return (False, "فشل في الفحص")
 
-# ---------- قاعدة بيانات البصمات (Hashes) ----------
+# ---------- قاعدة بيانات البصمات ----------
 KNOWN_BAD_HASHES = {
     "5d41402abc4b2a76b9719d911017c592": "أداة حقن Vape",
     "7d793037a0760186574b0282f2f435e7": "أداة حقن Sigma",
@@ -111,7 +113,32 @@ def compute_file_hash(file_path, algo="md5"):
     except Exception:
         return None
 
-# ---------- فحص الريجستري (قراءة فقط) ----------
+# ---------- Entropy (كشف الملفات المضغوطة/المشفرة) ----------
+def compute_entropy(data):
+    if not data:
+        return 0.0
+    entropy = 0.0
+    for x in range(256):
+        p_x = data.count(x) / len(data)
+        if p_x > 0:
+            entropy += - p_x * math.log2(p_x)
+    return entropy
+
+# ---------- فحص كلمات مفتاحية في ملفات صغيرة ----------
+SUS_KEYWORDS_TXT = ["hack", "cheat", "inject", "vape", "sigma", "wurst", "killaura", "flyhack"]
+
+def quick_string_scan(file_path):
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read(1024 * 10)  # أول 10 كيلوبايت فقط
+        for kw in SUS_KEYWORDS_TXT:
+            if kw.encode('utf-8') in content:
+                return True
+    except:
+        pass
+    return False
+
+# ---------- فحص الريجستري ----------
 def scan_registry_startup():
     results = []
     if not is_windows():
@@ -232,68 +259,143 @@ def scan_network_connections():
         pass
     return results
 
-# ---------- فحص الملفات الأساسي (مع دمج محرك القواعد) ----------
-def scan_files(target_paths, progress_callback=None):
-    results = []
-    total_estimate = 0
-    for base in target_paths:
-        bp = Path(base)
-        if bp.exists():
-            total_estimate += max(1, len(list(bp.rglob("*"))))
-    current = 0
-    for base in target_paths:
-        base_path = Path(base)
-        if not base_path.exists():
-            continue
-        for root, dirs, files in os.walk(base_path):
-            root_path = Path(root)
-            for file in files:
-                current += 1
-                if progress_callback:
-                    progress_callback(current, total_estimate, f"ملفات... {file}")
-                fp = root_path / file
-                try:
-                    reasons, score = [], 0
-                    if is_hidden(str(fp)):
-                        reasons.append("ملف مخفي")
-                        score += 15
-                    ns = suspicious_name_score(file)
-                    if ns > 0:
-                        reasons.append("اسم/امتداد مشبوه")
-                        score += ns
-                    ext = fp.suffix.lower()
-                    if ext in [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"] and in_user_dirs(str(fp)):
-                        reasons.append("تنفيذي في مجلد مستخدم")
-                        score += 60
-                    if ext in [".exe", ".dll", ".sys"]:
-                        signed, signer = check_digital_signature(str(fp))
-                        if signed is False:
-                            reasons.append("ملف غير موقّع رقميًا")
-                            score += 20
-                        fhash = compute_file_hash(str(fp))
-                        if fhash and fhash in KNOWN_BAD_HASHES:
-                            reasons.append(f"بصمة تطابق أداة حقن معروفة: {KNOWN_BAD_HASHES[fhash]}")
-                            score += 80
-                    # تطبيق محرك القواعد على هذا الملف
-                    rule_score, rule_reasons = scan_with_rules(str(fp))
-                    if rule_reasons:
-                        reasons.extend(rule_reasons)
-                        score += rule_score
+# ---------- فحص ملف واحد (الوحدة الأساسية للمعالجة المتوازية) ----------
+def analyze_single_file(file_path, quick_mode=False):
+    reasons = []
+    score = 0
+    fp = Path(file_path)
+    file_size = 0
+    try:
+        file_size = fp.stat().st_size
+    except OSError:
+        return 0, [], 0
 
-                    if score > 0:
-                        severity = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
-                        results.append({
-                            "category": "File",
-                            "name": file,
-                            "path": str(fp),
-                            "reasons": reasons,
-                            "score": min(score, 100),
-                            "severity": severity
-                        })
-                except Exception:
-                    continue
+    # تخطي الملفات الضخمة > 200MB
+    if file_size > 200 * 1024 * 1024:
+        return 0, [], file_size
+
+    try:
+        # الاختفاء
+        if is_hidden(str(fp)):
+            reasons.append("ملف مخفي")
+            score += 15
+        # اسم مشبوه
+        ns = suspicious_name_score(fp.name)
+        if ns > 0:
+            reasons.append("اسم/امتداد مشبوه")
+            score += ns
+        ext = fp.suffix.lower()
+        if ext in [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"] and in_user_dirs(str(fp)):
+            reasons.append("تنفيذي في مجلد مستخدم")
+            score += 60
+
+        if ext in [".exe", ".dll", ".sys"]:
+            # توقيع
+            signed, signer = check_digital_signature(str(fp))
+            if signed is False:
+                reasons.append("ملف غير موقّع رقميًا")
+                score += 20
+            # هاش
+            if not quick_mode:
+                fhash = compute_file_hash(str(fp))
+                if fhash and fhash in KNOWN_BAD_HASHES:
+                    reasons.append(f"بصمة تطابق أداة حقن معروفة: {KNOWN_BAD_HASHES[fhash]}")
+                    score += 80
+            # Entropy
+            if file_size < 10 * 1024 * 1024:  # للملفات الصغيرة نسبياً
+                try:
+                    with open(str(fp), "rb") as f:
+                        data = f.read(1024 * 64)  # أول 64KB كافية
+                    ent = compute_entropy(data)
+                    if ent > 7.5:
+                        reasons.append(f"انتروبيا عالية ({ent:.1f}) - ملف مشفر/مضغوط بشكل مريب")
+                        score += 40
+                except:
+                    pass
+
+        # فحص نصي سريع للملفات الصغيرة
+        if ext in [".txt", ".cfg", ".ini", ".json", ".xml", ".log"] and file_size < 1024 * 1024:
+            if quick_string_scan(str(fp)):
+                reasons.append("يحتوي كلمات مشبوهة")
+                score += 30
+
+        if not quick_mode:
+            rule_score, rule_reasons = scan_with_rules(str(fp))
+            if rule_reasons:
+                reasons.extend(rule_reasons)
+                score += rule_score
+    except Exception:
+        pass
+
+    return min(score, 100), reasons, file_size
+
+# ---------- المسح المتوازي السريع للمجلدات (مع إمكانية الإيقاف) ----------
+def scan_files_parallel(target_paths, progress_callback=None, quick_mode=False, stop_flag=None):
+    """
+    فحص الملفات باستخدام ThreadPoolExecutor.
+    stop_flag: دالة تُرجع True إذا طُلب الإيقاف.
+    """
+    results = []
+    # تجميع كل مسارات الملفات أولاً (باستخدام scandir السريع)
+    all_files = []
+    for base in target_paths:
+        if not os.path.exists(base):
+            continue
+        for root, dirs, files in os.walk(base, topdown=True, followlinks=False):
+            # استخدام os.scandir لأداء أفضل
+            for entry in os.scandir(root):
+                if entry.is_file():
+                    all_files.append(entry.path)
+            if stop_flag and stop_flag():
+                break
+        if stop_flag and stop_flag():
+            break
+
+    total_files = len(all_files)
+    if total_files == 0:
+        return results
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        # وضع حدود زمنية لكل مستقبل
+        future_to_path = {
+            executor.submit(analyze_single_file, path, quick_mode): path
+            for path in all_files
+        }
+        for future in as_completed(future_to_path):
+            completed += 1
+            if stop_flag and stop_flag():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            path = future_to_path[future]
+            try:
+                score, reasons, fsize = future.result(timeout=2.0)
+                if score > 0:
+                    severity = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
+                    results.append({
+                        "category": "File",
+                        "name": Path(path).name,
+                        "path": path,
+                        "reasons": reasons,
+                        "score": min(score, 100),
+                        "severity": severity
+                    })
+            except (TimeoutError, Exception):
+                pass  # تخطي الملفات التي تستغرق أكثر من 2 ثانية
+            if progress_callback and total_files > 0:
+                percent = int((completed / total_files) * 100)
+                progress_callback(completed, total_files, f"ملفات... {percent}%")
+
     return results
 
+# ---------- وضع التوافق للفحص الأول (للاتصال بالواجهة القديمة إذا لزم) ----------
+def scan_files(target_paths, progress_callback=None):
+    return scan_files_parallel(target_paths, progress_callback, quick_mode=False)
+
+def quick_scan_files(target_paths, progress_callback=None):
+    return scan_files_parallel(target_paths, progress_callback, quick_mode=True)
+
+# ---------- فحص العمليات ----------
 def scan_processes(progress_callback=None):
     results = []
     if psutil is None:
@@ -369,61 +471,91 @@ def scan_startup(progress_callback=None):
             })
     return results
 
-# ---------- فحص يدوي لملف/مجلد (يُستخدم من الواجهة) ----------
+def scan_browsers():
+    results = []
+    if not is_windows():
+        return results
+    import winreg
+    browser_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Clients\StartMenuInternet"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Clients\StartMenuInternet"),
+    ]
+    browser_names = set()
+    for hkey, subkey in browser_paths:
+        try:
+            with winreg.OpenKey(hkey, subkey, 0, winreg.KEY_READ) as key:
+                i = 0
+                while True:
+                    try:
+                        name = winreg.EnumKey(key, i)
+                        i += 1
+                        browser_names.add(name)
+                    except OSError:
+                        break
+        except Exception:
+            continue
+    for bname in browser_names:
+        results.append({
+            "category": "Browser",
+            "name": bname,
+            "path": "",
+            "reasons": ["متصفح مثبت على الجهاز"],
+            "score": 0,
+            "severity": "Low"
+        })
+    return results
+
+# ---------- أدوات النظام ----------
+SYSTEM_TOOLS = {
+    "Task Manager": "taskmgr.exe",
+    "Event Viewer": "eventvwr.msc",
+    "Control Panel": "control.exe",
+    "Registry Editor": "regedit.exe",
+    "System Configuration": "msconfig.exe",
+    "Resource Monitor": "resmon.exe",
+}
+
+def open_system_tool(tool_name):
+    if tool_name in SYSTEM_TOOLS:
+        try:
+            subprocess.Popen(SYSTEM_TOOLS[tool_name], shell=True)
+            return True
+        except Exception:
+            return False
+    return False
+
+def get_system_tools_list():
+    results = []
+    for tool_name, tool_cmd in SYSTEM_TOOLS.items():
+        results.append({
+            "category": "System Tool",
+            "name": tool_name,
+            "path": tool_cmd,
+            "reasons": ["أداة نظام للتحليل اليدوي"],
+            "score": 0,
+            "severity": "Low"
+        })
+    return results
+
+# ---------- فحص يدوي ----------
 def manual_scan_path(target_path, progress_callback=None):
-    """
-    فحص مسار واحد (ملف أو مجلد) ويعيد قائمة النتائج.
-    """
     if os.path.isfile(target_path):
-        # فحص ملف مفرد
+        score, reasons, _ = analyze_single_file(target_path, quick_mode=False)
         results = []
-        fp = Path(target_path)
-        if progress_callback:
-            progress_callback(0, 1, f"فحص {fp.name}")
-        reasons, score = [], 0
-        if is_hidden(str(fp)):
-            reasons.append("ملف مخفي")
-            score += 15
-        ns = suspicious_name_score(fp.name)
-        if ns > 0:
-            reasons.append("اسم/امتداد مشبوه")
-            score += ns
-        ext = fp.suffix.lower()
-        if ext in [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"] and in_user_dirs(str(fp)):
-            reasons.append("تنفيذي في مجلد مستخدم")
-            score += 60
-        if ext in [".exe", ".dll", ".sys"]:
-            signed, _ = check_digital_signature(str(fp))
-            if signed is False:
-                reasons.append("ملف غير موقّع رقميًا")
-                score += 20
-            fhash = compute_file_hash(str(fp))
-            if fhash and fhash in KNOWN_BAD_HASHES:
-                reasons.append(f"بصمة تطابق أداة حقن معروفة: {KNOWN_BAD_HASHES[fhash]}")
-                score += 80
-        rule_score, rule_reasons = scan_with_rules(str(fp))
-        if rule_reasons:
-            reasons.extend(rule_reasons)
-            score += rule_score
         if score > 0:
             severity = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
             results.append({
                 "category": "Manual File",
-                "name": fp.name,
-                "path": str(fp),
+                "name": Path(target_path).name,
+                "path": str(target_path),
                 "reasons": reasons,
-                "score": min(score, 100),
+                "score": score,
                 "severity": severity
             })
-        if progress_callback:
-            progress_callback(1, 1, "اكتمل")
         return results
     elif os.path.isdir(target_path):
-        # فحص المجلد كمجلد مستهدف
-        results = scan_files([target_path], progress_callback)
-        return results
-    else:
-        return []
+        return scan_files_parallel([target_path], progress_callback, quick_mode=False)
+    return []
 
 def build_report(results):
     return {"generated_at": datetime.now().isoformat(), "results": results}

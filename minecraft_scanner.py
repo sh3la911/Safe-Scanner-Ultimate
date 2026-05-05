@@ -1,16 +1,19 @@
 """
-Minecraft Security Scanner - Ultimate Edition
-الآن مع دمج محرك القواعد (Rules Scanner) على جميع المودات والملفات.
-Read-only, safe, deep heuristic analysis.
+Minecraft Security Scanner – Ultimate High‑Speed Edition
+فحص متوازي، Timeout، PE Headers، RegEx كسول، قابل للإيقاف.
+Read‑only, safe, deep heuristic analysis.
 """
 import os
 import zipfile
 import ctypes
 import json
 import subprocess
+import re
+import struct
 from pathlib import Path
 from datetime import datetime
 from ctypes import wintypes
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 try:
     import psutil
@@ -55,6 +58,7 @@ def get_minecraft_dirs():
         dirs.append(("ModPacks", modpacks))
     return dirs
 
+# ---------- قاعدة أسماء injectors ----------
 INJECTOR_NAMES = [
     "vape", "sigma", "wurst", "meteor", "raven", "rise", "tenacity",
     "novoline", "flux", "azura", "cracked vape", "vape lite", "vape v4",
@@ -63,16 +67,238 @@ INJECTOR_NAMES = [
     "azura client", "injector", "ghost client", "ghost hack",
     "autoclicker", "auto clicker", "macro tool", "autohotkey",
     "pulover's macro creator", "killaura", "xray", "freecam",
-    "esp hack", "tracers", "aimbot", "reach hack"
+    "esp hack", "tracers", "aimbot", "reach hack",
+    "aimware", "onetap", "gamesense", "fatality", "neverlose",
+    "plaguecheat", "eternity", "memeware", "wannacry", "spookyware",
+    "moon", "lunar ghost", "drip", "dopamine", "entropy",
+    "sight", "rise lite", "horion", "strike", "pulsive",
+    "crackinject", "injector v2", "injector v3", "hack client",
+    "cheat client", "internal", "external", "multihack",
+    "minemen", "minemenclub", "bypass", "cracked", "toolkit",
+    "nuker", "scaffold", "velocity", "antikb", "antibot",
+    "esp", "wallhack", "regen", "flyhack", "speedmine",
+    "autoblock", "autosoup", "autogapple", "autopot", "autorespawn",
+    "invcleaner", "cheststealer", "autotool", "autowalk", "antiafk",
+    "antifire", "antiknockback", "antispin", "autofish",
+    "bedaura", "bedbomber", "blink", "boatfly", "bowaimbot",
+    "bridgeassist", "civbreak", "clicker", "crystalaura",
+    "derp", "dolphin", "ecme", "elytrafly", "extinguish",
+    "fastplace", "fastuse", "flight", "freeze", "glide",
+    "handofgod", "headroll", "holefiller", "icewalk", "infinitereach",
+    "jesus", "jetpack", "killpotion", "lagback", "lightningdetect",
+    "longjump", "macekill", "magiccarpet", "multiaura", "nametags",
+    "nocom", "nofall", "noglitchblocks", "nohurtcam", "nointeract",
+    "nolevitation", "nominingtrace", "nopush", "noslowdown",
+    "notrace", "noweather", "packetfly", "parkour", "phase",
+    "portals", "prophunt", "push", "range", "refill",
+    "regen", "remova", "restock", "revive", "rotation",
+    "safe", "scaffold", "search", "selfdestruct", "step",
+    "strafe", "surround", "swim", "timer", "tower",
+    "tp", "triggerbot", "twerk", "unpush", "vclip",
+    "veinminer", "waterleave", "windowclick", "xcarry", "yaw",
+    "zelda", "zen", "zero", "zigzag", "zoom",
+    "alice", "astolfo", "augustus", "bomb", "cedo", "client",
+    "comet", "copper", "crispy", "cucklord", "cyber",
+    "diamond", "dortware", "dzs", "element", "envy",
+    "eversense", "exhibition", "eximius", "exire", "fade",
+    "faith", "fatality", "forgehax", "future", "gladiator",
+    "grief", "hackintosh", "hail", "halal", "haram",
+    "helios", "horion", "hydrogen", "ice breaker", "impact",
+    "inertia", "infinity", "ingro", "intent", "interact",
+    "invasion", "iridium", "jackpot", "jartex", "jigsaw",
+    "kamiblue", "kangaroo", "karambit", "karma", "katarina",
+    "kevin", "kilo", "kite", "krma", "laby",
+    "latency", "launchpad", "legacy", "legend", "lemon",
+    "lethal", "liam", "light", "lilith", "limbo",
+    "linear", "lithium", "llama", "loom", "loov",
+    "lucifer", "luminous", "luna", "lunar", "lust",
+    "lux", "lyra", "mack", "magna", "magnet",
+    "maia", "malice", "mandarin", "mango", "manthe",
+    "marble", "master", "matrix", "maul", "meow",
+    "mercury", "mesa", "method", "meteor+", "meteor++",
+    "metro", "midnight", "miku", "miner", "minestrike",
+    "miracle", "misaki", "mist", "mixtape", "molten",
+    "monster", "morpheus", "morphine", "mosquito", "mother",
+    "mouse", "muffin", "mumble", "mushroom", "mystic",
+    "nano", "natasha", "nautilus", "nebula", "necrotic",
+    "neko", "nemesis", "neptune", "nero", "neuro",
+    "neutron", "nexus", "night", "nimbus", "nitrogen",
+    "nocturne", "node", "noir", "noodle", "nora",
+    "north", "notch", "nova", "nuclear", "nucleus",
+    "null", "nv", "nylon", "oasis", "obelisk",
+    "obsidian", "octane", "odd", "odyssey", "ohio",
+    "olive", "omega", "ominous", "one", "onyx",
+    "opal", "open", "operator", "orbit", "orion",
+    "orthodox", "osiris", "outline", "overwatch", "oxygen",
+    "packet", "paimon", "panda", "pandora", "panther",
+    "paradox", "parallel", "patron", "pegasus", "penguin",
+    "penix", "perception", "perfect", "perplex", "pharaoh",
+    "phantom", "phoenix", "photon", "piano", "pixel",
+    "plague", "plasma", "platinum", "pluto", "poison",
+    "polar", "pole", "police", "pop", "portal",
+    "potato", "power", "premium", "pride", "prism",
+    "pro", "prototype", "proxima", "psycho", "pulse",
+    "pumpkin", "purity", "pyro", "quad", "quake",
+    "quantum", "quartz", "quest", "r3", "rabbit",
+    "rage", "rainbow", "rapid", "rapture", "rat",
+    "ravager", "raw", "razor", "reality", "rebel",
+    "reborn", "recoil", "red", "reflect", "reflex",
+    "relax", "relic", "remedy", "remix", "renee",
+    "renegade", "reno", "replay", "resilience", "resolve",
+    "revolt", "rhino", "rhythm", "rift", "riley",
+    "ripple", "risee", "ritual", "rival", "robin",
+    "rocket", "rogue", "ronin", "rose", "rowan",
+    "ruby", "ruin", "runner", "rupture", "ruthless",
+    "saber", "sable", "sacred", "sadness", "sage",
+    "salvation", "samurai", "sanctuary", "sand", "sapphire",
+    "sativa", "saturn", "savage", "scale", "scarab",
+    "scatter", "scepter", "schism", "scorpion", "scr1pt",
+    "seismic", "selene", "sense", "sentinel", "seraph",
+    "serenity", "servitude", "shade", "shadow", "shard",
+    "shatter", "sheep", "shell", "shelly", "shield",
+    "shine", "shinigami", "shock", "short", "shrimp",
+    "shuffle", "sight", "sigma5", "silence", "silicon",
+    "silver", "simplicity", "sin", "siphon", "skid",
+    "skills", "skull", "skye", "slate", "sleep",
+    "slick", "slime", "slingshot", "sloth", "smack",
+    "smart", "smite", "smoke", "snake", "snapshot",
+    "sniper", "snow", "soar", "solar", "solitude",
+    "soma", "sonic", "sophia", "sorrow", "soul",
+    "spade", "spark", "spartan", "spectrum", "speed",
+    "sphere", "spider", "spike", "spirit", "splash",
+    "spoiler", "spring", "squad", "stabilizer", "stained",
+    "star", "stardust", "static", "stealth", "stellar",
+    "stinger", "st0rm", "strange", "stratus", "strawberry",
+    "stream", "stress", "strobe", "studio", "submerge",
+    "subtle", "sunset", "super", "supreme", "surge",
+    "surrender", "swagger", "sweet", "swift", "swindle",
+    "switch", "symmetry", "symphony", "syndicate", "synergy",
+    "syntax", "sys", "t0p", "taboo", "tactical",
+    "tailor", "talent", "talon", "tangent", "tango",
+    "tanker", "tara", "target", "tarzan", "taze",
+    "teardrop", "techno", "tempest", "tender", "tensor",
+    "terror", "tesla", "test", "tether", "thc",
+    "theia", "thera", "thermo", "thor", "threat",
+    "thunder", "tick", "tidal", "tiger", "time",
+    "titan", "toast", "token", "tokyo", "torch",
+    "tornado", "torrent", "toxic", "tracer", "trail",
+    "tranquil", "transform", "trauma", "treasure", "treat",
+    "tribe", "trick", "trigger", "trill", "trinity",
+    "trip", "triton", "troll", "tropical", "trust",
+    "tundra", "turbo", "turtle", "twilight", "twister",
+    "typhoon", "tyrant", "tzunami", "uber", "ultima",
+    "ultra", "uncut", "under", "unicorn", "unify",
+    "unique", "unite", "universe", "up", "uprising",
+    "uranium", "urbex", "ursa", "utopia", "vortex",
+    "vacuum", "valhalla", "valkyrie", "valor", "vampire",
+    "vanguard", "vanish", "vapor", "vault", "vector",
+    "vegeta", "velocity", "venom", "ventus", "vera",
+    "vertex", "viper", "vivid", "vocal", "void",
+    "volcanic", "volt", "vulcan", "vulture", "waffle",
+    "walker", "wander", "warfare", "warlock", "warm",
+    "warp", "warrior", "water", "wave", "weapon",
+    "weave", "weaver", "wedge", "weird", "wendy",
+    "whale", "wheat", "whisper", "wicked", "wild",
+    "willow", "wind", "wine", "wing", "winner",
+    "winter", "wire", "wish", "wisp", "witch",
+    "wolf", "wonder", "wood", "world", "woven",
+    "wrath", "wreck", "xeno", "xerox", "xi",
+    "xile", "xirus", "xorr", "xray+", "xray++",
+    "xtasy", "xtreme", "xyro", "yacht", "yal",
+    "yam", "yard", "yasha", "yell", "yellow",
+    "yeti", "yield", "yoda", "yolk", "yonder",
+    "yorick", "yoru", "young", "yugen", "zahara",
+    "zap", "zapper", "zara", "zaria", "zeal",
+    "zelda", "zendaya", "zenn", "zephyr", "zero",
+    "zeta", "zeus", "ziggs", "zinc", "zion",
+    "zip", "zodiac", "zoe", "zombie", "zone",
+    "zori", "zulu", "zyklon", "zyl", "zym",
+    "cheat_config", "hack_config", "aimbot_config", "killaura_config",
+    "fly_config", "speed_config", "reach_config", "velocity_config",
+    "autoclicker_config", "xray_config", "freecam_config",
+    "cheats.json", "hacks.json", "injector.json", "vape.json",
+    "sigma.json", "wurst.json", "meteor.json", "raven.json",
+    "rise.json", "tenacity.json", "novoline.json", "flux.json",
+    "cheats.txt", "hacks.txt", "injector.txt", "vape.ini",
+    "sigma.ini", "wurst.ini", "meteor.ini", "raven.ini",
+    "rise.ini", "tenacity.ini", "novoline.ini", "flux.ini"
 ]
 
 MACRO_TOOLS = [
     "autohotkey.exe", "autohotkey", "pulover's macro creator.exe",
     "macro creator.exe", "auto clicker.exe", "autoclicker.exe",
-    "opus auto clicker.exe", "speed auto clicker.exe"
+    "opus auto clicker.exe", "speed auto clicker.exe",
+    "auto macro.exe", "macro recorder.exe", "mouse recorder.exe",
+    "keystroke.exe", "keyboard macro.exe"
 ]
 
-# ---------- 1. فتح JAR وتحليل (مع القواعد) ----------
+# ---------- RegEx كسول ----------
+_injector_pattern = None
+_macro_pattern = None
+
+def get_injector_pattern():
+    global _injector_pattern
+    if _injector_pattern is None:
+        _injector_pattern = re.compile("|".join(re.escape(name) for name in INJECTOR_NAMES), re.IGNORECASE)
+    return _injector_pattern
+
+def get_macro_pattern():
+    global _macro_pattern
+    if _macro_pattern is None:
+        _macro_pattern = re.compile("|".join(re.escape(tool) for tool in MACRO_TOOLS), re.IGNORECASE)
+    return _macro_pattern
+
+# ========== تحليل PE Headers (EXE/DLL) ==========
+SUSPICIOUS_IMPORTS = [
+    "WriteProcessMemory", "VirtualAllocEx", "CreateRemoteThread",
+    "NtCreateThreadEx", "SetWindowsHookEx", "GetAsyncKeyState",
+    "OpenProcess", "ReadProcessMemory", "NtReadVirtualMemory"
+]
+
+def analyze_pe_imports(file_path):
+    """قراءة imports من PE والبحث عن دوال خطيرة (Windows فقط)."""
+    results = []
+    if not file_path.lower().endswith(('.exe', '.dll')):
+        return results
+    try:
+        with open(file_path, "rb") as f:
+            # قراءة DOS Header
+            dos_header = f.read(64)
+            if len(dos_header) < 64 or dos_header[0:2] != b'MZ':
+                return results
+            pe_offset = struct.unpack('<I', dos_header[0x3C:0x40])[0]
+            f.seek(pe_offset)
+            pe_sig = f.read(4)
+            if pe_sig != b'PE\x00\x00':
+                return results
+            # قراءة COFF Header
+            coff = f.read(20)
+            # قراءة Optional Header
+            opt_hdr_size = struct.unpack('<H', coff[16:18])[0]
+            optional_header = f.read(opt_hdr_size)
+            # Data directories
+            data_dirs_start = f.tell()
+            f.seek(data_dirs_start + 8)  # Import directory RVA
+            import_rva = struct.unpack('<I', f.read(4))[0]
+            if import_rva == 0:
+                return results
+            # نكتفي بفحص بسيط للـIAT (غير مكتمل لكن يُعطي فكرة)
+            # سنعتمد على قراءة سريعة للسلاسل النصية في الملف بدلاً من التحليل الكامل
+    except Exception:
+        pass
+
+    # طريقة أسرع: قراءة السلاسل داخل الملف والبحث عن imports
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read(4 * 1024 * 1024)  # 4MB max
+        for imp in SUSPICIOUS_IMPORTS:
+            if imp.encode('utf-8') in content:
+                results.append(imp)
+    except:
+        pass
+    return results
+
+# ---------- 1. فتح JAR وتحليل (مع Timeout) ----------
 def deep_scan_jar(jar_path):
     reasons, score = [], 0
     jar_name = Path(jar_path).name.lower()
@@ -113,13 +339,11 @@ def deep_scan_jar(jar_path):
         reasons.append("ملف JAR تالف / لا يفتح")
         score += 10
 
-    for injector in INJECTOR_NAMES:
-        if injector in jar_name:
-            reasons.append(f"اسم ملف يشير إلى injector معروف: {injector}")
-            score += 70
-            break
+    matches = get_injector_pattern().findall(jar_name)
+    if matches:
+        reasons.append(f"اسم ملف يشير إلى injector: {', '.join(matches[:3])}")
+        score += 70
 
-    # تطبيق محرك القواعد على ملف JAR
     rule_score, rule_reasons = scan_with_rules(jar_path)
     if rule_reasons:
         reasons.extend(rule_reasons)
@@ -127,8 +351,17 @@ def deep_scan_jar(jar_path):
 
     return reasons, min(score, 100)
 
-# ---------- 2. فحص المودات ----------
-def scan_jar_mods(progress_callback=None):
+def timed_deep_scan_jar(jar_path, timeout=2.0):
+    """تشغيل deep_scan_jar مع timeout."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(deep_scan_jar, jar_path)
+        try:
+            return future.result(timeout=timeout)
+        except (TimeoutError, Exception):
+            return [f"تجاوز الوقت المحدد ({timeout}s)"], 0
+
+# ---------- 2. فحص المودات (متوازي) ----------
+def scan_jar_mods(progress_callback=None, stop_flag=None):
     results = []
     minecraft_dirs = get_minecraft_dirs()
     if not minecraft_dirs:
@@ -146,24 +379,44 @@ def scan_jar_mods(progress_callback=None):
                     for jar in ver.glob("*.jar"):
                         mod_dirs.append((f"Version-{ver.name}", ver))
 
-    total_mods = sum(len(list(md.glob("*.jar"))) for _, md in mod_dirs)
-    current = 0
+    all_jars = []
     for launcher_name, md in mod_dirs:
-        for jar in md.glob("*.jar"):
-            current += 1
-            if progress_callback:
-                progress_callback(current, total_mods, f"فحص: {jar.name}")
-            reasons, score = deep_scan_jar(str(jar))
-            if score > 0:
-                severity = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
-                results.append({
-                    "category": "Minecraft Mod",
-                    "name": jar.name,
-                    "path": str(jar),
-                    "reasons": reasons,
-                    "score": score,
-                    "severity": severity
-                })
+        all_jars.extend([(str(jar), launcher_name) for jar in md.glob("*.jar")])
+
+    total_mods = len(all_jars)
+    if total_mods == 0:
+        return results
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_jar = {
+            executor.submit(timed_deep_scan_jar, jar): jar
+            for jar, _ in all_jars
+        }
+        for future in as_completed(future_to_jar):
+            completed += 1
+            if stop_flag and stop_flag():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            jar = future_to_jar[future]
+            try:
+                reasons, score = future.result()
+                if score > 0:
+                    severity = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
+                    results.append({
+                        "category": "Minecraft Mod",
+                        "name": Path(jar).name,
+                        "path": jar,
+                        "reasons": reasons,
+                        "score": score,
+                        "severity": severity
+                    })
+            except:
+                pass
+            if progress_callback and total_mods > 0:
+                percent = int((completed / total_mods) * 100)
+                progress_callback(completed, total_mods, f"مودات... {percent}%")
+
     return results
 
 # ---------- 3. فحص عمليات ماينكرافت ----------
@@ -206,17 +459,14 @@ def scan_minecraft_processes(progress_callback=None):
                     score += 60
 
             proc_name = info.get("name", "").lower()
-            for injector in INJECTOR_NAMES:
-                if injector in proc_name:
-                    reasons.append(f"اسم عملية يشير إلى injector: {injector}")
-                    score += 70
-                    break
+            matches = get_injector_pattern().findall(proc_name)
+            if matches:
+                reasons.append(f"اسم عملية يشير إلى injector: {', '.join(matches[:3])}")
+                score += 70
 
-            for mt in MACRO_TOOLS:
-                if mt in proc_name:
-                    reasons.append(f"أداة ماكرو / auto-clicker مشبوهة: {mt}")
-                    score += 50
-                    break
+            if get_macro_pattern().search(proc_name):
+                reasons.append("أداة ماكرو / auto-clicker مشبوهة")
+                score += 50
 
             if score > 0:
                 severity = "High" if score >= 70 else "Medium"
@@ -299,12 +549,13 @@ def scan_screenshots(progress_callback=None):
             current += 1
             if progress_callback:
                 progress_callback(current, total, f"لقطات: {img.name}")
-            if any(k in img.name.lower() for k in INJECTOR_NAMES):
+            if get_injector_pattern().search(img.name.lower()):
+                matches = get_injector_pattern().findall(img.name.lower())
                 results.append({
                     "category": "Screenshot Evidence",
                     "name": img.name,
                     "path": str(img),
-                    "reasons": ["لقطة شاشة باسم هاك/انجكتور"],
+                    "reasons": [f"لقطة شاشة باسم مشبوه: {', '.join(matches[:3])}"],
                     "score": 25,
                     "severity": "Low"
                 })
@@ -415,36 +666,189 @@ def scan_command_history(progress_callback=None):
                 pass
     return results
 
-# ---------- 9. كشف ملفات DLL/EXE داخل مجلدات ماينكرافت ----------
-def scan_suspicious_native_files(progress_callback=None):
+# ---------- 9. كشف ملفات DLL/EXE داخل مجلدات ماينكرافت (مع PE Headers) ----------
+def scan_suspicious_native_files(progress_callback=None, stop_flag=None):
     results = []
     minecraft_dirs = get_minecraft_dirs()
+    all_files = []
     for launcher_name, base in minecraft_dirs:
         for pattern in ["*.dll", "*.exe"]:
-            for file in base.glob(pattern):
-                # تطبيق محرك القواعد على هذا الملف
-                rule_score, rule_reasons = scan_with_rules(str(file))
-                if rule_reasons:
+            all_files.extend([str(f) for f in base.glob(pattern)])
+
+    total = len(all_files)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_file = {
+            executor.submit(analyze_single_native, f): f
+            for f in all_files
+        }
+        for future in as_completed(future_to_file):
+            completed += 1
+            if stop_flag and stop_flag():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            file_path = future_to_file[future]
+            try:
+                reasons, score = future.result(timeout=3.0)
+                if score > 0:
                     results.append({
                         "category": "Suspicious Native File",
-                        "name": file.name,
-                        "path": str(file),
-                        "reasons": ["مكتبة أصلية أو برنامج تنفيذي داخل مجلد ماينكرافت"] + rule_reasons,
-                        "score": min(80 + rule_score, 100),
-                        "severity": "High"
+                        "name": Path(file_path).name,
+                        "path": file_path,
+                        "reasons": reasons,
+                        "score": score,
+                        "severity": "High" if score >= 70 else "Medium"
                     })
-                else:
-                    results.append({
-                        "category": "Suspicious Native File",
-                        "name": file.name,
-                        "path": str(file),
-                        "reasons": ["مكتبة أصلية أو برنامج تنفيذي داخل مجلد ماينكرافت"],
-                        "score": 80,
-                        "severity": "High"
-                    })
+            except:
+                pass
+            if progress_callback and total > 0:
+                percent = int((completed / total) * 100)
+                progress_callback(completed, total, f"ملفات أصلية... {percent}%")
+
     return results
 
-# ---------- 10. فحص إعدادات البروكسي/VPN ----------
+def analyze_single_native(file_path):
+    reasons = []
+    score = 80  # وجود DLL/EXE بحد ذاته مشبوه
+    reasons.append("مكتبة أصلية أو برنامج تنفيذي داخل مجلد ماينكرافت")
+
+    # فحص الـ PE Imports
+    pe_imports = analyze_pe_imports(file_path)
+    if pe_imports:
+        reasons.append(f"واردات خطيرة: {', '.join(pe_imports[:4])}")
+        score += 15
+
+    # فحص القواعد
+    rule_score, rule_reasons = scan_with_rules(file_path)
+    if rule_reasons:
+        reasons.extend(rule_reasons)
+        score += rule_score
+
+    return reasons, min(score, 100)
+
+# ---------- 10. فحص ModPacks ----------
+def scan_modpacks(progress_callback=None):
+    results = []
+    home = Path.home()
+    modpacks_dir = home / "AppData" / "Roaming" / "modpacks"
+    if not modpacks_dir.exists():
+        return results
+    packs = list(modpacks_dir.iterdir())
+    total = len(packs)
+    for i, pack in enumerate(packs, 1):
+        if progress_callback:
+            progress_callback(i, total, f"فحص ModPack: {pack.name}")
+        if pack.is_dir():
+            reasons = []
+            score = 5
+            for jar in pack.glob("*.jar"):
+                r, s = timed_deep_scan_jar(str(jar), timeout=2.0)
+                if r:
+                    reasons.extend(r)
+                    score += s
+            if score > 5:
+                results.append({
+                    "category": "ModPack",
+                    "name": pack.name,
+                    "path": str(pack),
+                    "reasons": reasons,
+                    "score": min(score, 100),
+                    "severity": "High" if score >= 70 else "Medium"
+                })
+            else:
+                results.append({
+                    "category": "ModPack",
+                    "name": pack.name,
+                    "path": str(pack),
+                    "reasons": ["حزمة تعديلات (ModPack) موجودة"],
+                    "score": 5,
+                    "severity": "Low"
+                })
+    return results
+
+# ---------- 11. فحص Recent Files ----------
+def scan_recent_files(progress_callback=None):
+    results = []
+    recent_dir = Path(os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Recent"))
+    if not recent_dir.exists():
+        return results
+    files = list(recent_dir.glob("*"))
+    total = len(files)
+    for i, file in enumerate(files, 1):
+        if progress_callback:
+            progress_callback(i, total, f"فحص Recent: {file.name}")
+        try:
+            name_lower = file.name.lower()
+            matches = get_injector_pattern().findall(name_lower)
+            if matches:
+                results.append({
+                    "category": "Recent File",
+                    "name": file.name,
+                    "path": str(file),
+                    "reasons": [f"ملف حديث باسم injector: {', '.join(matches[:3])}"],
+                    "score": 60,
+                    "severity": "High"
+                })
+        except:
+            continue
+    return results
+
+# ---------- 12. فحص Event Logs ----------
+def scan_event_logs(progress_callback=None):
+    results = []
+    try:
+        out = subprocess.check_output(
+            'wevtutil qe Security /c:50 /rd:true /f:text /q:"*[System[EventID=4688]]"',
+            shell=True, text=True, errors='ignore'
+        )
+        if get_injector_pattern().search(out.lower()):
+            results.append({
+                "category": "Event Log",
+                "name": "Security Event 4688",
+                "path": "Windows Security Log",
+                "reasons": ["سجل أحداث يحتوي اسم هاك"],
+                "score": 50,
+                "severity": "Medium"
+            })
+    except:
+        pass
+    return results
+
+# ---------- 13. فحص أرشيفات ذاتية الفك ----------
+def scan_self_extracting(progress_callback=None):
+    results = []
+    targets = [
+        os.path.expanduser("~/Downloads"),
+        os.path.expanduser("~/Desktop"),
+    ]
+    files = []
+    for target in targets:
+        p = Path(target)
+        if p.exists():
+            files.extend(list(p.glob("*.zip")) + list(p.glob("*.rar")) + list(p.glob("*.7z")))
+    total = len(files)
+    for i, archive in enumerate(files, 1):
+        if progress_callback:
+            progress_callback(i, total, f"فحص أرشيف: {archive.name}")
+        try:
+            with zipfile.ZipFile(archive, 'r') as zf:
+                entries = zf.namelist()
+                for entry in entries:
+                    if entry.lower().endswith(('.exe', '.bat', '.cmd', '.ps1', '.vbs')):
+                        results.append({
+                            "category": "Self-extracting Archive",
+                            "name": archive.name,
+                            "path": str(archive),
+                            "reasons": [f"أرشيف يحتوي ملف تنفيذي: {entry}"],
+                            "score": 65,
+                            "severity": "High"
+                        })
+                        break
+        except:
+            pass
+    return results
+
+# ---------- 14. فحص إعدادات البروكسي ----------
 def scan_proxy_settings():
     results = []
     try:
@@ -463,7 +867,7 @@ def scan_proxy_settings():
         pass
     return results
 
-# ---------- 11. فحص أدلة محذوفة ----------
+# ---------- 15. فحص أدلة محذوفة ----------
 def scan_deleted_evidence(progress_callback=None):
     results = []
     recycle = Path("C:/$Recycle.Bin")
@@ -484,8 +888,7 @@ def scan_deleted_evidence(progress_callback=None):
             if not item.is_file():
                 continue
             try:
-                name_lower = item.name.lower()
-                if any(k in name_lower for k in INJECTOR_NAMES):
+                if get_injector_pattern().search(item.name.lower()):
                     results.append({
                         "category": "Deleted Evidence",
                         "name": item.name,
@@ -498,7 +901,7 @@ def scan_deleted_evidence(progress_callback=None):
                 continue
     return results
 
-# ---------- 12. فحص حسابات Alt ----------
+# ---------- 16. فحص حسابات Alt ----------
 def scan_alt_accounts(progress_callback=None):
     results = []
     minecraft_dirs = get_minecraft_dirs()
